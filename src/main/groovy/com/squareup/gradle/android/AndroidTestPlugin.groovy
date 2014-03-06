@@ -3,6 +3,7 @@ import com.android.build.gradle.AppPlugin
 import com.android.build.gradle.BasePlugin
 import com.android.build.gradle.LibraryPlugin
 import com.android.builder.BuilderConstants
+import com.android.build.gradle.AppExtension
 import org.gradle.api.Plugin
 import org.gradle.api.Project
 import org.gradle.api.plugins.JavaBasePlugin
@@ -11,7 +12,10 @@ import org.gradle.api.tasks.SourceSet
 import org.gradle.api.tasks.testing.Test
 import org.gradle.api.tasks.testing.TestReport
 
+import javax.inject.Inject
+
 class AndroidTestPlugin implements Plugin<Project> {
+  private static final String TEST_PREFIX = 'unit_test'
   private static final String TEST_DIR = 'test'
   private static final String TEST_TASK_NAME = 'test'
   private static final String TEST_CLASSES_DIR = "$TEST_DIR-classes"
@@ -32,6 +36,10 @@ class AndroidTestPlugin implements Plugin<Project> {
 
     // Create the configuration for test-only dependencies.
     def testConfiguration = project.configurations.create(TEST_TASK_NAME + 'Compile')
+
+    // Create extension so we can configure sourceSets
+    project.extensions.create('androidTest', AndroidTestExtension, project)
+
     // Make the 'test' configuration extend from the normal 'compile' configuration.
     testConfiguration.extendsFrom project.configurations.getByName('compile')
 
@@ -79,18 +87,29 @@ class AndroidTestPlugin implements Plugin<Project> {
       def processedResourcesPath = variant.mergeResources.outputDir
       def processedAssetsPath = variant.mergeAssets.outputDir
 
+      def gatheredSourceSets = gatherSources(javaConvention.sourceSets, buildTypeName, projectFlavorName, projectFlavorNames)
       def testSrcDirs = []
-      testSrcDirs.add(project.file("src/$TEST_DIR/java"))
-      testSrcDirs.add(project.file("src/$TEST_DIR$buildTypeName/java"))
-      testSrcDirs.add(project.file("src/$TEST_DIR$projectFlavorName/java"))
-      projectFlavorNames.each { flavor ->
-        testSrcDirs.add project.file("src/$TEST_DIR$flavor/java")
+      def testResourceDirs = []
+      if (gatheredSourceSets.isEmpty()) {
+        testSrcDirs.add(project.file("src/$TEST_DIR/java"))
+        testSrcDirs.add(project.file("src/$TEST_DIR$buildTypeName/java"))
+        testSrcDirs.add(project.file("src/$TEST_DIR$projectFlavorName/java"))
+        projectFlavorNames.each { flavor ->
+            testSrcDirs.add project.file("src/$TEST_DIR$flavor/java")
+        }
+
+        testResourceDirs.add(project.file("src/$TEST_DIR/resources"))
+      } else {
+        gatheredSourceSets.each() { sourceSet ->
+          testSrcDirs.addAll sourceSet.java.srcDirs
+          testResourceDirs.addAll sourceSet.resources.srcDirs
+        }
       }
 
       SourceSet variationSources = javaConvention.sourceSets.create "$TEST_TASK_NAME$variationName"
-      variationSources.resources.srcDirs project.file("src/$TEST_DIR/resources")
+      variationSources.resources.setSrcDirs testResourceDirs
       variationSources.java.setSrcDirs testSrcDirs
-
+      def mainPackage = hasAppPlugin ? ((AppExtension)project.extensions.getByName('android')).defaultConfig.packageName : null
       log.debug("----------------------------------------")
       log.debug("build type name: $buildTypeName")
       log.debug("project flavor name: $projectFlavorName")
@@ -98,8 +117,9 @@ class AndroidTestPlugin implements Plugin<Project> {
       log.debug("manifest: $processedManifestPath")
       log.debug("resources: $processedResourcesPath")
       log.debug("assets: $processedAssetsPath")
-      log.debug("test sources: $variationSources.java.asPath")
-      log.debug("test resources: $variationSources.resources.asPath")
+      log.debug("test sources: $variationSources.java.srcDirs")
+      log.debug("test resources: $variationSources.resources.srcDirs")
+      log.debug("main package: $mainPackage")
       log.debug("----------------------------------------")
 
       def javaCompile = variant.javaCompile;
@@ -160,8 +180,36 @@ class AndroidTestPlugin implements Plugin<Project> {
       testRunTask.systemProperties.put('android.manifest', processedManifestPath)
       testRunTask.systemProperties.put('android.resources', processedResourcesPath)
       testRunTask.systemProperties.put('android.assets', processedAssetsPath)
-
+      testRunTask.systemProperties.put('android.package', mainPackage)
       testTask.reportOn testRunTask
       }
     }
+
+    def gatherSources(sourceSets, buildTypeName, projectFlavorName, projectFlavorNames) {
+      def allSources = []
+      def names = ['main', buildTypeName, projectFlavorName]
+      names.addAll(projectFlavorNames)
+      names.each() {
+        def sources = sourceSets.findByName(it)
+        if (sources != null) {
+          allSources.add(sources)
+        }
+      }
+      return allSources
+    }
+}
+
+class AndroidTestExtension {
+
+  final Project project
+
+  @Inject
+  public AndroidTestExtension(Project project) {
+    this.project = project
+  }
+
+  def sourceSets(Closure closure) {
+    JavaPluginConvention javaConvention = project.convention.getPlugin JavaPluginConvention
+    javaConvention.sourceSets(closure)
+  }
 }
